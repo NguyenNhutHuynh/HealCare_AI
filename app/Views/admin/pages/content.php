@@ -1,0 +1,9 @@
+<section class="admin-page-heading">
+    <div><span class="eyebrow">CMS / KHO KIẾN THỨC</span><h1>Quản lý nội dung</h1><p>Kho dữ liệu nội bộ đang được dùng cho tra cứu bệnh, thực phẩm, công thức và AI.</p></div>
+</section>
+<section class="content-management-grid">
+    <article class="admin-panel content-management-card"><span class="content-management-icon">♡</span><div><span class="eyebrow">DISEASES</span><h2><?= e((string) $counts['diseases']) ?> bệnh</h2><p>Có thông tin nguyên nhân, cách hạn chế, dấu hiệu và thực phẩm tham khảo.</p><a class="text-link" href="<?= url('diseases') ?>">Xem trang bệnh →</a></div></article>
+    <article class="admin-panel content-management-card"><span class="content-management-icon">✦</span><div><span class="eyebrow">FOODS</span><h2><?= e((string) $counts['foods']) ?> thực phẩm</h2><p>Phân loại rau củ, trái cây, đạm, đồ uống và món ăn vặt.</p><a class="text-link" href="<?= url('foods') ?>">Xem thư viện →</a></div></article>
+    <article class="admin-panel content-management-card"><span class="content-management-icon">⌁</span><div><span class="eyebrow">RECIPES</span><h2><?= e((string) $counts['recipes']) ?> công thức</h2><p>Có nguyên liệu, cách chế biến và liên kết video YouTube tham khảo.</p><a class="text-link" href="<?= url('foods', ['tab' => 'recipes']) ?>">Xem công thức →</a></div></article>
+</section>
+<section class="admin-panel admin-content-guide"><span class="eyebrow">CÁCH CẬP NHẬT</span><h2>Dữ liệu được tách riêng để dễ phát triển</h2><p>Quản trị viên có thể cập nhật nội dung trong thư mục <code>data/</code>. Khi dự án chuyển sang MySQL, có thể thay thế các tệp dữ liệu bằng Repository mới mà không phải thay đổi giao diện người dùng.</p><div class="code-paths"><code>data/diseases.php</code><code>data/foods.php</code><code>data/recipes.php</code><code>data/disease_guides.php</code></div></section>
