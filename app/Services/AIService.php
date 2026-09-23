@@ -11,38 +11,46 @@ final class AIService
 
     public function reply(string $question, array $history = [], array $profile = []): array
     {
-        $apiKey = getenv('OPENAI_API_KEY') ?: '';
+        $apiKey = $_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: '';
         if ($apiKey === '') {
             return ['ok' => false, 'mode' => 'fallback', 'message' => $this->fallback($question)];
         }
 
-        $model = getenv('OPENAI_MODEL') ?: 'gpt-5-mini';
+        $model = $_ENV['GEMINI_MODEL'] ?? getenv('GEMINI_MODEL') ?: 'gemini-1.5-pro';
         $profileContext = $profile ? ' Hồ sơ người dùng (chỉ dùng để cá nhân hóa, không coi là bệnh án đã xác minh): ' . json_encode($profile, JSON_UNESCAPED_UNICODE) : '';
-        $input = [[
-            'role' => 'system',
-            'content' => [[
-                'type' => 'input_text',
-                'text' => 'Bạn là Healcare, trợ lý dinh dưỡng bằng tiếng Việt. Chỉ cung cấp kiến thức tham khảo, không chẩn đoán, không kê đơn, không tự thay đổi thuốc. Luôn hỏi thêm bệnh nền, thuốc đang dùng và giai đoạn điều trị khi cần. Với dấu hiệu cấp cứu, khuyên gọi 115 hoặc đi cấp cứu. Trả lời dễ đọc cho người lớn tuổi, ngắn gọn, có các mục: Nên làm, Nên hạn chế, Lưu ý. Dữ liệu nội bộ của Healcare sau đây là nguồn ưu tiên nhưng không thay thế tư vấn y khoa: ' . $this->knowledge->context() . $profileContext,
-            ]],
-        ]];
+        
+        $systemInstruction = 'Bạn là Healcare, trợ lý dinh dưỡng bằng tiếng Việt. Chỉ cung cấp kiến thức tham khảo, không chẩn đoán, không kê đơn, không tự thay đổi thuốc. Luôn hỏi thêm bệnh nền, thuốc đang dùng và giai đoạn điều trị khi cần. Với dấu hiệu cấp cứu, khuyên gọi 115 hoặc đi cấp cứu. Trả lời dễ đọc cho người lớn tuổi, ngắn gọn, có các mục: Nên làm, Nên hạn chế, Lưu ý. Dữ liệu nội bộ của Healcare sau đây là nguồn ưu tiên nhưng không thay thế tư vấn y khoa: ' . $this->knowledge->context() . $profileContext;
 
+        $contents = [];
         foreach (array_slice($history, -6) as $message) {
             if (isset($message['role'], $message['content']) && in_array($message['role'], ['user', 'assistant'], true)) {
-                $input[] = [
-                    'role' => $message['role'],
-                    'content' => [['type' => 'input_text', 'text' => (string) $message['content']]],
+                $contents[] = [
+                    'role' => $message['role'] === 'assistant' ? 'model' : 'user',
+                    'parts' => [['text' => (string) $message['content']]],
                 ];
             }
         }
-        $input[] = ['role' => 'user', 'content' => [['type' => 'input_text', 'text' => $question]]];
+        $contents[] = [
+            'role' => 'user', 
+            'parts' => [['text' => $question]]
+        ];
 
-        $payload = json_encode(['model' => $model, 'input' => $input, 'store' => false], JSON_UNESCAPED_UNICODE);
-        $ch = curl_init('https://api.openai.com/v1/responses');
+        $payload = json_encode([
+            'system_instruction' => [
+                'parts' => [['text' => $systemInstruction]]
+            ],
+            'contents' => $contents,
+        ], JSON_UNESCAPED_UNICODE);
+
+        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
+        
+        $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_POST => true,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT => 45,
-            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Authorization: Bearer ' . $apiKey],
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
             CURLOPT_POSTFIELDS => $payload,
         ]);
         $body = curl_exec($ch);
@@ -51,43 +59,52 @@ final class AIService
         curl_close($ch);
 
         if ($body === false || $status < 200 || $status >= 300) {
-            return ['ok' => false, 'mode' => 'fallback', 'message' => $this->fallback($question), 'error' => $error ?: 'OpenAI API request failed'];
+            return ['ok' => false, 'mode' => 'fallback', 'message' => $this->fallback($question), 'error' => $error ?: 'Gemini API request failed'];
         }
 
         $json = json_decode($body, true);
-        $text = $json['output_text'] ?? '';
-        if ($text === '' && isset($json['output'])) {
-            foreach ($json['output'] as $item) {
-                foreach (($item['content'] ?? []) as $content) {
-                    $text .= $content['text'] ?? '';
-                }
-            }
-        }
+        $text = $json['candidates'][0]['content']['parts'][0]['text'] ?? '';
 
         return $text !== ''
-            ? ['ok' => true, 'mode' => 'openai', 'message' => $text]
+            ? ['ok' => true, 'mode' => 'gemini', 'message' => $text]
             : ['ok' => false, 'mode' => 'fallback', 'message' => $this->fallback($question)];
     }
 
     public function recommend(array $profile): array
     {
-        $apiKey = getenv('OPENAI_API_KEY') ?: '';
+        $apiKey = $_ENV['GEMINI_API_KEY'] ?? getenv('GEMINI_API_KEY') ?: '';
         if ($apiKey === '') {
-            return ['ok' => false, 'mode' => 'fallback', 'message' => 'Hãy dùng các món đã lọc theo hồ sơ bên cạnh. Khi cấu hình OPENAI_API_KEY, AI có thể lập thực đơn cá nhân hóa hơn.'];
+            return ['ok' => false, 'mode' => 'fallback', 'message' => 'Hãy dùng các món đã lọc theo hồ sơ bên cạnh. Khi cấu hình GEMINI_API_KEY, AI có thể lập thực đơn cá nhân hóa hơn.'];
         }
 
-        $model = getenv('OPENAI_MODEL') ?: 'gpt-5-mini';
+        $model = $_ENV['GEMINI_MODEL'] ?? getenv('GEMINI_MODEL') ?: 'gemini-1.5-pro';
         $prompt = 'Dựa trên hồ sơ người dùng sau đây, hãy đề xuất 3 ý tưởng món ăn trong ngày bằng tiếng Việt. Nêu tên món, nguyên liệu chính, cách nấu ngắn gọn và lưu ý an toàn. Không đưa định lượng điều trị, không tự thay đổi thuốc, nhắc người dùng hỏi bác sĩ khi có bệnh thận hoặc dị ứng. Hồ sơ: ' . json_encode($profile, JSON_UNESCAPED_UNICODE) . '. Kho dữ liệu món ăn Healcare: ' . $this->knowledge->context();
-        $payload = json_encode(['model' => $model, 'input' => $prompt, 'store' => false], JSON_UNESCAPED_UNICODE);
-        $ch = curl_init('https://api.openai.com/v1/responses');
-        curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 45, CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Authorization: Bearer ' . $apiKey], CURLOPT_POSTFIELDS => $payload]);
+        
+        $payload = json_encode([
+            'contents' => [
+                ['parts' => [['text' => $prompt]]]
+            ]
+        ], JSON_UNESCAPED_UNICODE);
+        
+        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
+        
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true, 
+            CURLOPT_RETURNTRANSFER => true, 
+            CURLOPT_TIMEOUT => 45, 
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'], 
+            CURLOPT_POSTFIELDS => $payload
+        ]);
         $body = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
+        
         $json = json_decode((string) $body, true);
-        $text = $json['output_text'] ?? '';
-        if ($text === '' && isset($json['output'])) foreach ($json['output'] as $item) foreach (($item['content'] ?? []) as $content) $text .= $content['text'] ?? '';
-        return $status >= 200 && $status < 300 && $text !== '' ? ['ok' => true, 'mode' => 'openai', 'message' => $text] : ['ok' => false, 'mode' => 'fallback', 'message' => 'Chưa tạo được thực đơn AI lúc này. Bạn có thể dùng các món đã được lọc theo hồ sơ.'];
+        $text = $json['candidates'][0]['content']['parts'][0]['text'] ?? '';
+        
+        return $status >= 200 && $status < 300 && $text !== '' ? ['ok' => true, 'mode' => 'gemini', 'message' => $text] : ['ok' => false, 'mode' => 'fallback', 'message' => 'Chưa tạo được thực đơn AI lúc này. Bạn có thể dùng các món đã lọc theo hồ sơ.'];
     }
 
     private function fallback(string $question): string

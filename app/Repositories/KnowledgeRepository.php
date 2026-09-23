@@ -3,71 +3,161 @@ declare(strict_types=1);
 
 namespace Healcare\Repositories;
 
+use PDO;
+use Healcare\Services\DiseaseGeneratorService;
+
 final class KnowledgeRepository
 {
-    private array $diseases;
-    private array $foods;
-    private array $recipes;
-    private array $contacts;
+    private PDO $db;
+    private DiseaseGeneratorService $diseaseGenerator;
 
-    public function __construct()
+    public function __construct(PDO $db, DiseaseGeneratorService $diseaseGenerator)
     {
-        $this->diseases = require __DIR__ . '/../../data/diseases.php';
-        $details = require __DIR__ . '/../../data/disease_details.php';
-        $guides = require __DIR__ . '/../../data/disease_guides.php';
-        foreach ($details as $slug => $detail) {
-            if (isset($this->diseases[$slug])) {
-                $this->diseases[$slug] = array_merge($this->diseases[$slug], $detail);
-            }
-        }
-        foreach ($guides as $slug => $guide) {
-            if (isset($this->diseases[$slug])) {
-                $this->diseases[$slug] = array_merge($this->diseases[$slug], $guide);
-            }
-        }
-        $this->foods = require __DIR__ . '/../../data/foods.php';
-        $this->recipes = require __DIR__ . '/../../data/recipes.php';
-        $this->recipes = array_merge($this->recipes, require __DIR__ . '/../../data/disease_recipes.php');
-        $recipeImages = require __DIR__ . '/../../data/recipe_images.php';
-        foreach ($this->recipes as &$recipe) {
-            $title = (string) ($recipe['title'] ?? '');
-            if (isset($recipeImages[$title])) {
-                $recipe['image'] = $recipeImages[$title];
-            }
-        }
-        unset($recipe);
-        $foodImages = require __DIR__ . '/../../data/food_images.php';
-        foreach ($this->foods as &$food) {
-            $name = (string) ($food['name'] ?? '');
-            if (isset($foodImages[$name])) {
-                $food['image'] = $foodImages[$name];
-            }
-        }
-        unset($food);
-        $this->contacts = require __DIR__ . '/../../data/medical_contacts.php';
+        $this->db = $db;
+        $this->diseaseGenerator = $diseaseGenerator;
     }
 
-    public function diseases(): array { return $this->diseases; }
-    public function foods(): array { return $this->foods; }
-    public function recipes(): array { return $this->recipes; }
-    public function contacts(): array { return $this->contacts; }
+    public function diseases(): array
+    {
+        $stmt = $this->db->query("SELECT * FROM diseases");
+        $diseases = [];
+        while ($row = $stmt->fetch()) {
+            $diseases[$row['slug']] = $this->formatDiseaseRow($row);
+        }
+        return $diseases;
+    }
+
+    public function foods(): array
+    {
+        $stmt = $this->db->query("SELECT * FROM foods");
+        $foods = [];
+        while ($row = $stmt->fetch()) {
+            $row['benefits'] = json_decode($row['benefits'] ?? '[]', true);
+            $foods[] = $row;
+        }
+        return $foods;
+    }
+
+    public function recipes(): array
+    {
+        $stmt = $this->db->query("SELECT * FROM recipes");
+        $recipes = [];
+        while ($row = $stmt->fetch()) {
+            $row['ingredients'] = json_decode($row['ingredients'] ?? '[]', true);
+            $row['steps'] = json_decode($row['steps'] ?? '[]', true);
+            $row['suitable_for'] = json_decode($row['suitable_for'] ?? '[]', true);
+            $row['desc'] = $row['description'] ?? '';
+            $row['level'] = $row['difficulty'] ?? '';
+            $recipes[] = $row;
+        }
+        return $recipes;
+    }
+
+    public function contacts(): array
+    {
+        $stmt = $this->db->query("SELECT * FROM medical_contacts");
+        return $stmt->fetchAll();
+    }
 
     public function recipesForDisease(string $slug): array
     {
+        $recipes = $this->recipes();
         return array_values(array_filter(
-            $this->recipes,
+            $recipes,
             static fn(array $recipe): bool => in_array($slug, $recipe['suitable_for'] ?? [], true)
         ));
     }
 
     public function findDisease(string $slug): ?array
     {
-        return $this->diseases[$slug] ?? null;
+        $stmt = $this->db->prepare("SELECT * FROM diseases WHERE slug = :slug");
+        $stmt->execute(['slug' => $slug]);
+        $row = $stmt->fetch();
+        if ($row) {
+            return $this->formatDiseaseRow($row);
+        }
+        return null;
+    }
+
+    public function search(string $query, string $type = 'all'): array
+    {
+        $queryLower = mb_strtolower(trim($query), 'UTF-8');
+        
+        $diseases = $this->diseases();
+        $foods = $this->foods();
+        $recipes = $this->recipes();
+
+        if ($queryLower === '') {
+            return ['diseases' => $diseases, 'foods' => $foods, 'recipes' => $recipes];
+        }
+
+        $match = static function (array $item) use ($queryLower): bool {
+            $flatten = static function (array $values) use (&$flatten): array {
+                $result = [];
+                foreach ($values as $value) {
+                    is_array($value) ? $result = array_merge($result, $flatten($value)) : $result[] = (string) $value;
+                }
+                return $result;
+            };
+            return mb_strpos(mb_strtolower(implode(' ', $flatten($item)), 'UTF-8'), $queryLower) !== false;
+        };
+
+        $resultDiseases = ($type === 'all' || $type === 'disease') ? array_filter($diseases, $match) : [];
+
+        // If no disease found, ask AI
+        if (empty($resultDiseases) && ($type === 'all' || $type === 'disease')) {
+            $generated = $this->diseaseGenerator->generateDiseaseInfo($query);
+            if ($generated) {
+                // Insert to DB
+                $stmt = $this->db->prepare("
+                    INSERT IGNORE INTO diseases 
+                    (slug, name, icon, color, description, eat, limit_food, symptoms, causes, prevention, overview, risk_factors, monitoring, daily, urgent, source) 
+                    VALUES (:slug, :name, :icon, :color, :description, :eat, :limit_food, :symptoms, :causes, :prevention, :overview, :risk_factors, :monitoring, :daily, :urgent, :source)
+                ");
+                $stmt->execute([
+                    'slug' => $generated['slug'],
+                    'name' => $generated['name'],
+                    'icon' => $generated['icon'],
+                    'color' => $generated['color'],
+                    'description' => $generated['description'],
+                    'eat' => json_encode($generated['eat'] ?? []),
+                    'limit_food' => json_encode($generated['limit_food'] ?? []),
+                    'symptoms' => json_encode($generated['symptoms'] ?? []),
+                    'causes' => json_encode($generated['causes'] ?? []),
+                    'prevention' => json_encode($generated['prevention'] ?? []),
+                    'overview' => $generated['overview'] ?? '',
+                    'risk_factors' => json_encode($generated['risk_factors'] ?? []),
+                    'monitoring' => json_encode($generated['monitoring'] ?? []),
+                    'daily' => json_encode($generated['daily'] ?? []),
+                    'urgent' => json_encode($generated['urgent'] ?? []),
+                    'source' => $generated['source'] ?? '',
+                ]);
+                
+                // Re-fetch to include the newly added disease
+                $resultDiseases[$generated['slug']] = $generated;
+            }
+        }
+
+        return [
+            'diseases' => $resultDiseases,
+            'foods' => ($type === 'all' || $type === 'food') ? array_filter($foods, $match) : [],
+            'recipes' => ($type === 'all' || $type === 'recipe') ? array_filter($recipes, $match) : [],
+        ];
+    }
+
+    public function context(): string
+    {
+        return json_encode([
+            'diseases' => $this->diseases(),
+            'foods' => $this->foods(),
+            'recipes' => $this->recipes(),
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
 
     public function illustration(string $slug): string
     {
-        return [
+        // Try to match standard illustrations or return default
+        $map = [
             'tim-mach' => 'heart',
             'tieu-duong' => 'diabetes',
             'tang-huyet-ap' => 'pressure',
@@ -81,40 +171,28 @@ final class KnowledgeRepository
             'beo-phi' => 'weight',
             'loang-xuong' => 'bone',
             'thieu-mau' => 'blood',
-        ][$slug] ?? 'diabetes';
-    }
-
-    public function search(string $query, string $type = 'all'): array
-    {
-        $query = mb_strtolower(trim($query), 'UTF-8');
-        if ($query === '') {
-            return ['diseases' => $this->diseases, 'foods' => $this->foods, 'recipes' => $this->recipes];
-        }
-
-        $match = static function (array $item) use ($query): bool {
-            $flatten = static function (array $values) use (&$flatten): array {
-                $result = [];
-                foreach ($values as $value) {
-                    is_array($value) ? $result = array_merge($result, $flatten($value)) : $result[] = (string) $value;
-                }
-                return $result;
-            };
-            return mb_strpos(mb_strtolower(implode(' ', $flatten($item)), 'UTF-8'), $query) !== false;
-        };
-
-        return [
-            'diseases' => ($type === 'all' || $type === 'disease') ? array_filter($this->diseases, $match) : [],
-            'foods' => ($type === 'all' || $type === 'food') ? array_filter($this->foods, $match) : [],
-            'recipes' => ($type === 'all' || $type === 'recipe') ? array_filter($this->recipes, $match) : [],
         ];
+        return $map[$slug] ?? 'diabetes';
     }
 
-    public function context(): string
+    private function formatDiseaseRow(array $row): array
     {
-        return json_encode([
-            'diseases' => $this->diseases,
-            'foods' => $this->foods,
-            'recipes' => $this->recipes,
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        return [
+            'name' => $row['name'],
+            'icon' => $row['icon'],
+            'color' => $row['color'],
+            'desc' => $row['description'],
+            'eat' => json_decode($row['eat'] ?? '[]', true),
+            'limit' => json_decode($row['limit_food'] ?? '[]', true),
+            'symptoms' => json_decode($row['symptoms'] ?? '[]', true),
+            'causes' => json_decode($row['causes'] ?? '[]', true),
+            'prevention' => json_decode($row['prevention'] ?? '[]', true),
+            'overview' => $row['overview'] ?? '',
+            'risk_factors' => json_decode($row['risk_factors'] ?? '[]', true),
+            'monitoring' => json_decode($row['monitoring'] ?? '[]', true),
+            'daily' => json_decode($row['daily'] ?? '[]', true),
+            'urgent' => json_decode($row['urgent'] ?? '[]', true),
+            'source' => $row['source'] ?? '',
+        ];
     }
 }

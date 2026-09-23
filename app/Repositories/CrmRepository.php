@@ -3,47 +3,43 @@ declare(strict_types=1);
 
 namespace Healcare\Repositories;
 
+use PDO;
+
 final class CrmRepository
 {
-    private string $storageFile;
+    private PDO $db;
 
-    public function __construct(?string $storageFile = null)
+    public function __construct(PDO $db)
     {
-        $this->storageFile = $storageFile ?: __DIR__ . '/../../data/storage/crm_contacts.php';
+        $this->db = $db;
     }
 
     public function allContacts(string $query = '', string $status = 'all'): array
     {
-        $contacts = $this->read();
-        $query = mb_strtolower(trim($query), 'UTF-8');
-
-        $contacts = array_filter($contacts, static function (array $contact) use ($query, $status): bool {
-            if ($status !== 'all' && ($contact['status'] ?? '') !== $status) {
-                return false;
-            }
-            if ($query === '') {
-                return true;
-            }
-            $haystack = mb_strtolower(implode(' ', [
-                (string) ($contact['name'] ?? ''),
-                (string) ($contact['phone'] ?? ''),
-                (string) ($contact['message'] ?? ''),
-                (string) ($contact['notes'] ?? ''),
-            ]), 'UTF-8');
-            return mb_strpos($haystack, $query) !== false;
-        });
-
-        usort($contacts, static fn(array $left, array $right): int => strcmp(
-            (string) ($right['created_at'] ?? ''),
-            (string) ($left['created_at'] ?? '')
-        ));
-
-        return array_values($contacts);
+        $queryLower = mb_strtolower(trim($query), 'UTF-8');
+        
+        $sql = "SELECT * FROM crm_contacts WHERE 1=1";
+        $params = [];
+        
+        if ($status !== 'all') {
+            $sql .= " AND status = :status";
+            $params['status'] = $status;
+        }
+        
+        if ($queryLower !== '') {
+            $sql .= " AND (LOWER(name) LIKE :query OR LOWER(phone) LIKE :query OR LOWER(message) LIKE :query OR LOWER(notes) LIKE :query)";
+            $params['query'] = '%' . $queryLower . '%';
+        }
+        
+        $sql .= " ORDER BY created_at DESC";
+        
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll();
     }
 
     public function createContact(array $data): array
     {
-        $contacts = $this->read();
         $contact = [
             'id' => bin2hex(random_bytes(8)),
             'name' => trim((string) ($data['name'] ?? '')),
@@ -53,11 +49,15 @@ final class CrmRepository
             'status' => 'new',
             'priority' => 'normal',
             'notes' => '',
-            'created_at' => date(DATE_ATOM),
-            'updated_at' => date(DATE_ATOM),
+            'created_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
         ];
-        $contacts[] = $contact;
-        $this->write($contacts);
+        
+        $sql = "INSERT INTO crm_contacts (id, name, phone, message, source, status, priority, notes, created_at, updated_at) 
+                VALUES (:id, :name, :phone, :message, :source, :status, :priority, :notes, :created_at, :updated_at)";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($contact);
+        
         return $contact;
     }
 
@@ -69,60 +69,39 @@ final class CrmRepository
             return false;
         }
 
-        $contacts = $this->read();
-        foreach ($contacts as &$contact) {
-            if (($contact['id'] ?? '') !== $id) {
-                continue;
-            }
-            $contact['status'] = $status;
-            $contact['priority'] = $priority;
-            $contact['notes'] = trim($notes);
-            $contact['updated_at'] = date(DATE_ATOM);
-            $this->write($contacts);
-            return true;
-        }
-        unset($contact);
-        return false;
+        $sql = "UPDATE crm_contacts SET status = :status, priority = :priority, notes = :notes, updated_at = :updated_at WHERE id = :id";
+        $stmt = $this->db->prepare($sql);
+        return $stmt->execute([
+            'status' => $status,
+            'priority' => $priority,
+            'notes' => trim($notes),
+            'updated_at' => date('Y-m-d H:i:s'),
+            'id' => $id
+        ]);
     }
 
     public function stats(): array
     {
-        $contacts = $this->read();
+        $stmt = $this->db->query("SELECT status, COUNT(*) as count FROM crm_contacts GROUP BY status");
+        $results = $stmt->fetchAll();
+        
         $stats = [
-            'total' => count($contacts),
+            'total' => 0,
             'new' => 0,
             'in_progress' => 0,
             'resolved' => 0,
             'archived' => 0,
         ];
-        foreach ($contacts as $contact) {
-            $status = (string) ($contact['status'] ?? 'new');
+        
+        foreach ($results as $row) {
+            $status = $row['status'];
+            $count = (int)$row['count'];
+            $stats['total'] += $count;
             if (isset($stats[$status])) {
-                $stats[$status]++;
+                $stats[$status] = $count;
             }
         }
+        
         return $stats;
-    }
-
-    private function read(): array
-    {
-        if (!is_file($this->storageFile)) {
-            return [];
-        }
-        $data = require $this->storageFile;
-        return is_array($data) ? array_values(array_filter($data, 'is_array')) : [];
-    }
-
-    private function write(array $contacts): void
-    {
-        $directory = dirname($this->storageFile);
-        if (!is_dir($directory)) {
-            mkdir($directory, 0755, true);
-        }
-        file_put_contents(
-            $this->storageFile,
-            "<?php\n\nreturn " . var_export(array_values($contacts), true) . ";\n",
-            LOCK_EX
-        );
     }
 }

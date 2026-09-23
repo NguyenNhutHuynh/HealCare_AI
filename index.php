@@ -12,10 +12,20 @@ use Healcare\Controllers\RecommendationController;
 use Healcare\Repositories\CrmRepository;
 use Healcare\Repositories\KnowledgeRepository;
 use Healcare\Services\AdminAuthService;
+use Healcare\Core\Database;
+use Healcare\Services\DiseaseGeneratorService;
 
 $page = (string) ($_GET['page'] ?? 'home');
-$knowledge = new KnowledgeRepository();
-$crm = new CrmRepository();
+
+try {
+    $db = Database::getInstance();
+} catch (\Exception $e) {
+    die("Database connection error: " . $e->getMessage() . "<br>Did you run the SQL dump and configure .env?");
+}
+
+$diseaseGenerator = new DiseaseGeneratorService();
+$knowledge = new KnowledgeRepository($db, $diseaseGenerator);
+$crm = new CrmRepository($db);
 
 if (str_starts_with($page, 'admin')) {
     (new AdminController($knowledge, $crm, new AdminAuthService()))->dispatch($page);
